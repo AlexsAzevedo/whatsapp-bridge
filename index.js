@@ -6,10 +6,16 @@ const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.API_KEY || 'industrialize2024!';
+
+// URL do webhook para onde enviar mensagens recebidas
+const WEBHOOK_URL = process.env.WEBHOOK_GLOBAL_URL || '';
+const WEBHOOK_ENABLED = process.env.WEBHOOK_GLOBAL_ENABLED === 'true';
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -26,6 +32,35 @@ let connectionStatus = 'disconnected';
 let authDir = path.join('/tmp', 'auth_info');
 
 if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+
+// ─── Helper: enviar payload ao webhook configurado ────────────────────────────
+function sendToWebhook(payload) {
+  if (!WEBHOOK_ENABLED || !WEBHOOK_URL) return;
+  try {
+    const body = JSON.stringify(payload);
+    const url = new URL(WEBHOOK_URL);
+    const lib = url.protocol === 'https:' ? https : http;
+    const options = {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: 10000,
+    };
+    const req = lib.request(options, (res) => {
+      console.log(`[Webhook] Enviado → ${res.statusCode}`);
+    });
+    req.on('error', (err) => console.error('[Webhook] Erro:', err.message));
+    req.write(body);
+    req.end();
+  } catch (err) {
+    console.error('[Webhook] Falha ao enviar:', err.message);
+  }
+}
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
@@ -65,6 +100,34 @@ async function connectToWhatsApp() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // ─── Listener de mensagens recebidas ─────────────────────────────────────
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      // Ignorar mensagens enviadas pelo próprio número
+      if (msg.key?.fromMe) continue;
+      // Ignorar grupos
+      if (msg.key?.remoteJid?.endsWith('@g.us')) continue;
+
+      console.log('[WhatsApp] Mensagem recebida de:', msg.key?.remoteJid);
+
+      // Enviar ao webhook no formato compatível com o nosso handler
+      sendToWebhook({
+        event: 'MESSAGES_UPSERT',
+        data: {
+          key: {
+            remoteJid: msg.key?.remoteJid,
+            fromMe: false,
+            id: msg.key?.id,
+          },
+          pushName: msg.pushName || '',
+          message: msg.message,
+          messageTimestamp: msg.messageTimestamp,
+        },
+      });
+    }
+  });
 }
 
 app.get('/', (req, res) => {
@@ -152,5 +215,6 @@ app.post('/message/sendMedia', auth, async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`[Server] WhatsApp Bridge rodando na porta ${PORT}`);
+  console.log(`[Webhook] Global enabled: ${WEBHOOK_ENABLED}, URL: ${WEBHOOK_URL || '(não configurado)'}`);
   connectToWhatsApp();
 });
