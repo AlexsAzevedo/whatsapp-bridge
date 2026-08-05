@@ -169,18 +169,46 @@ app.delete('/instance/logout', auth, async (req, res) => {
   }
 });
 
+// ─── Helper: resolver JID correto via onWhatsApp ─────────────────────────────
+async function resolveJid(number) {
+  const clean = number.replace(/\D/g, '');
+  try {
+    const results = await sock.onWhatsApp(clean);
+    if (results && results.length > 0 && results[0].exists) {
+      console.log(`[JID] Encontrado: ${results[0].jid}`);
+      return results[0].jid;
+    }
+    // Tentar sem o 9 extra (numeros BR antigos)
+    if (clean.startsWith('55') && clean.length === 13) {
+      const sem9 = clean.slice(0, 4) + clean.slice(5);
+      const results2 = await sock.onWhatsApp(sem9);
+      if (results2 && results2.length > 0 && results2[0].exists) {
+        console.log(`[JID] Encontrado sem 9: ${results2[0].jid}`);
+        return results2[0].jid;
+      }
+    }
+    console.log(`[JID] Nao encontrado via onWhatsApp para ${clean}, usando JID direto`);
+  } catch (e) {
+    console.log(`[JID] onWhatsApp erro: ${e.message}, usando JID direto`);
+  }
+  return `${clean}@s.whatsapp.net`;
+}
+
 app.post('/message/sendText', auth, async (req, res) => {
   if (connectionStatus !== 'open') {
-    return res.status(400).json({ error: 'WhatsApp não conectado' });
+    return res.status(400).json({ error: 'WhatsApp nao conectado' });
   }
   const { number, text } = req.body;
-  if (!number || !text) return res.status(400).json({ error: 'number e text são obrigatórios' });
+  if (!number || !text) return res.status(400).json({ error: 'number e text sao obrigatorios' });
 
   try {
-    const jid = number.includes('@') ? number : `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+    const jid = number.includes('@') ? number : await resolveJid(number);
+    console.log(`[SendText] Enviando para JID: ${jid}, texto: ${text.substring(0, 50)}`);
     const result = await sock.sendMessage(jid, { text });
-    res.json({ success: true, messageId: result.key.id });
+    console.log(`[SendText] Sucesso! messageId: ${result.key.id}`);
+    res.json({ success: true, messageId: result.key.id, jid });
   } catch (err) {
+    console.error(`[SendText] Erro: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
